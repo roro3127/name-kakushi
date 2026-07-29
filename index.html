@@ -306,7 +306,8 @@
             <button id="wmZoomIn">＋</button>
           </div>
           <div class="canvas-wrap">
-            <canvas id="wmCanvas"></canvas>
+            <canvas id="wmCanvas" style="touch-action:none;cursor:grab;"></canvas>
+            <p class="small-note" style="text-align:center;margin-top:8px;">「1箇所（サイン風）」は、画像上の文字やロゴを指でドラッグして好きな場所へ動かせるよ。</p>
           </div>
 
           <div class="toolbar">
@@ -345,6 +346,7 @@
     <div class="ed-selbar" id="selBar"></div>
 
     <div class="ed-subbar" id="sub-brush">
+      <button class="chip" id="repairPenBtn" type="button" title="丸ペン＋名前隠しの色に切り替える">⭐ 修正ペン</button>
       <select id="brushKind">
         <option value="marker">透けマーカー</option>
         <option value="paint">絵の具</option>
@@ -1229,6 +1231,25 @@ function setTool(t){
 document.querySelectorAll('.ed-tool').forEach(b=>{
   b.addEventListener('click', ()=> setTool(b.dataset.tool));
 });
+function getRepairPenColor(){
+  /* 自動で隠す名前のうち、リスト先頭の色を優先。無ければ共通初期値へ戻す */
+  const enabled = appData.names.find(n=>n.enabled!==false && (n.hideColor || n.color));
+  const anyName = appData.names.find(n=>n.hideColor || n.color);
+  return enabled?.hideColor || enabled?.color || anyName?.hideColor || anyName?.color || appData.hidePrefs?.color || '#fff176';
+}
+function activateRepairPen(showNotice=true){
+  const kindEl = document.getElementById('brushKind');
+  const colorEl = document.getElementById('brushColor');
+  const widthEl = document.getElementById('brushWidth');
+  kindEl.value = 'solid';
+  colorEl.value = getRepairPenColor();
+  /* 細かい名前ズレの補正に使いやすい太さ。後からスライダーで変更可能 */
+  widthEl.value = '28';
+  updateTapeVariantUi();
+  requestRender();
+  if(showNotice) toast('修正ペンに切り替えたよ');
+}
+document.getElementById('repairPenBtn').addEventListener('click', ()=>activateRepairPen(true));
 document.getElementById('brushKind').addEventListener('change', ()=>{ updateTapeVariantUi(); requestRender(); });
 document.getElementById('brushTapeVariant').addEventListener('change', ()=>requestRender());
 document.getElementById('brushColor').addEventListener('input', ()=>requestRender());
@@ -1956,6 +1977,8 @@ function scheduleProjectSave(){
 /* ==================== ウォーターマーク（複数レイヤー対応） ==================== */
 let wmImg = null;
 let wmZoom = 1;
+let wmSelectedLayerId = null;
+let wmDrag = null;
 const wmCanvas = document.getElementById('wmCanvas');
 const wctx = wmCanvas.getContext('2d');
 
@@ -1966,7 +1989,8 @@ function defaultLayer(layout){
     text:'@your_name', font: WM_FONTS[0].value, textColor:'#ffffff', fontSize:28,
     logoDataUrl:null, logoImg:null, logoScale:18,
     opacity:35, angle: layout==='single' ? 0 : -30,
-    layout: layout||'tile', spacing:160, position:'br'
+    layout: layout||'tile', spacing:160, position:'br',
+    x: layout==='single' ? .90 : .5, y: layout==='single' ? .90 : .5
   };
 }
 let wmLayers = [ defaultLayer('tile') ];
@@ -2040,8 +2064,15 @@ function layerCardHtml(l, idx){
     <div class="divider"></div>
     <label>透明度</label>
     <input type="range" data-field="opacity" min="5" max="100" value="${l.opacity}">
-    <label>角度（回転）</label>
-    <input type="range" data-field="angle" min="-90" max="90" value="${l.angle}">
+    <label>角度（回転） <span class="small-note" data-angle-label>${l.angle}°</span></label>
+    <input type="range" data-field="angle" min="-90" max="90" step="1" value="${l.angle}">
+    <div class="seg" style="margin-top:6px;flex-wrap:wrap;">
+      <button type="button" class="mini-btn" data-act="angleQuick" data-angle="-30">-30°</button>
+      <button type="button" class="mini-btn" data-act="angleQuick" data-angle="-15">-15°</button>
+      <button type="button" class="mini-btn" data-act="angleQuick" data-angle="0">まっすぐ</button>
+      <button type="button" class="mini-btn" data-act="angleQuick" data-angle="15">15°</button>
+      <button type="button" class="mini-btn" data-act="angleQuick" data-angle="30">30°</button>
+    </div>
     <label>配置</label>
     <div class="seg">
       <label><input type="radio" name="layout-${l.id}" data-field="layout" value="tile" ${l.layout==='tile'?'checked':''}>タイル状</label>
@@ -2052,6 +2083,7 @@ function layerCardHtml(l, idx){
       <input type="range" data-field="spacing" min="60" max="400" value="${l.spacing}">
     </div>
     <div data-show-if="single" style="display:${l.layout==='single'?'block':'none'};">
+      <p class="small-note" style="line-height:1.7;margin:2px 0 8px;">画像上で直接ドラッグして自由に移動できるよ。下の位置指定は、最初の場所へサッと移すショートカットだよ。</p>
       <label>配置位置</label>
       <select data-field="position">
         <option value="br" ${l.position==='br'?'selected':''}>右下</option>
@@ -2093,14 +2125,28 @@ document.getElementById('wmLayersContainer').addEventListener('input', (e)=>{
   else if(field==='fontSize'){ l.fontSize = parseInt(e.target.value); }
   else if(field==='logoScale'){ l.logoScale = parseInt(e.target.value); }
   else if(field==='opacity'){ l.opacity = parseInt(e.target.value); }
-  else if(field==='angle'){ l.angle = parseInt(e.target.value); }
+  else if(field==='angle'){
+    l.angle = parseInt(e.target.value);
+    const label = card.querySelector('[data-angle-label]');
+    if(label) label.textContent = `${l.angle}°`;
+  }
   else if(field==='layout'){
     l.layout = e.target.value;
+    if(l.layout==='single'){
+      const pos = wmPositionPoint(l.position||'br');
+      if(!Number.isFinite(+l.x)) l.x=pos.x;
+      if(!Number.isFinite(+l.y)) l.y=pos.y;
+      wmSelectedLayerId = l.id;
+    }
     card.querySelector('[data-show-if=tile]').style.display = l.layout==='tile' ? 'block':'none';
     card.querySelector('[data-show-if=single]').style.display = l.layout==='single' ? 'block':'none';
   }
   else if(field==='spacing'){ l.spacing = parseInt(e.target.value); }
-  else if(field==='position'){ l.position = e.target.value; }
+  else if(field==='position'){
+    l.position = e.target.value;
+    const pos = wmPositionPoint(l.position);
+    l.x=pos.x; l.y=pos.y; wmSelectedLayerId=l.id;
+  }
   drawWmScene();
 });
 document.getElementById('wmLayersContainer').addEventListener('change', (e)=>{
@@ -2120,10 +2166,23 @@ document.getElementById('wmLayersContainer').addEventListener('change', (e)=>{
   }
 });
 document.getElementById('wmLayersContainer').addEventListener('click', (e)=>{
+  const card = e.target.closest('[data-layer-id]');
+  if(!card) return;
+  const l = getLayerById(card.dataset.layerId);
   if(e.target.dataset.act==='deleteLayer'){
-    const card = e.target.closest('[data-layer-id]');
-    wmLayers = wmLayers.filter(l=>l.id!==card.dataset.layerId);
+    wmLayers = wmLayers.filter(x=>x.id!==card.dataset.layerId);
+    if(wmSelectedLayerId===card.dataset.layerId) wmSelectedLayerId=null;
     renderWmLayerCards(); drawWmScene();
+    return;
+  }
+  if(e.target.dataset.act==='angleQuick' && l){
+    l.angle = parseInt(e.target.dataset.angle,10)||0;
+    const range = card.querySelector('[data-field=angle]');
+    const label = card.querySelector('[data-angle-label]');
+    if(range) range.value=l.angle;
+    if(label) label.textContent=`${l.angle}°`;
+    wmSelectedLayerId=l.id;
+    drawWmScene();
   }
 });
 document.getElementById('btnAddLayer').addEventListener('click', ()=>{
@@ -2131,6 +2190,96 @@ document.getElementById('btnAddLayer').addEventListener('click', ()=>{
   renderWmLayerCards(); drawWmScene();
   toast('透かしレイヤーを追加したよ');
 });
+
+function wmPositionPoint(position){
+  return ({ br:{x:.90,y:.90}, bl:{x:.10,y:.90}, tr:{x:.90,y:.10}, tl:{x:.10,y:.10}, center:{x:.5,y:.5} })[position] || {x:.5,y:.5};
+}
+function normalizeWmLayerPosition(l){
+  if(Number.isFinite(+l.x) && Number.isFinite(+l.y)) return;
+  const p = wmPositionPoint(l.position||'br');
+  l.x=p.x; l.y=p.y;
+}
+function wmMarkBounds(l, canvas, ctx){
+  let minX=Infinity, minY=Infinity, maxX=-Infinity, maxY=-Infinity;
+  if(l.types.includes('text') && l.text){
+    ctx.save();
+    ctx.font = `bold ${l.fontSize}px ${l.font}`;
+    const tw = Math.max(1, ctx.measureText(l.text).width);
+    ctx.restore();
+    minX=Math.min(minX,-tw/2); maxX=Math.max(maxX,tw/2);
+    minY=Math.min(minY,-l.fontSize*.65); maxY=Math.max(maxY,l.fontSize*.65);
+  }
+  if(l.types.includes('logo') && l.logoImg){
+    const w = canvas.width*(l.logoScale/100);
+    const h = w*(l.logoImg.naturalHeight/l.logoImg.naturalWidth);
+    const top = (l.types.includes('text') && l.text) ? l.fontSize*.9 : -h/2;
+    minX=Math.min(minX,-w/2); maxX=Math.max(maxX,w/2);
+    minY=Math.min(minY,top); maxY=Math.max(maxY,top+h);
+  }
+  if(!Number.isFinite(minX)) return {minX:-10,maxX:10,minY:-10,maxY:10};
+  return {minX,maxX,minY,maxY};
+}
+function wmRotatedOffsets(bounds, angleDeg){
+  const a=angleDeg*Math.PI/180, c=Math.cos(a), sn=Math.sin(a);
+  const corners=[[bounds.minX,bounds.minY],[bounds.maxX,bounds.minY],[bounds.maxX,bounds.maxY],[bounds.minX,bounds.maxY]];
+  const pts=corners.map(([x,y])=>({x:x*c-y*sn,y:x*sn+y*c}));
+  return { minX:Math.min(...pts.map(p=>p.x)), maxX:Math.max(...pts.map(p=>p.x)), minY:Math.min(...pts.map(p=>p.y)), maxY:Math.max(...pts.map(p=>p.y)) };
+}
+function clampWmLayer(l, canvas, ctx){
+  normalizeWmLayerPosition(l);
+  const b=wmMarkBounds(l,canvas,ctx), r=wmRotatedOffsets(b,l.angle||0);
+  const pad=Math.max(4,Math.min(canvas.width,canvas.height)*.01);
+  let cx=l.x*canvas.width, cy=l.y*canvas.height;
+  const minCx=pad-r.minX, maxCx=canvas.width-pad-r.maxX;
+  const minCy=pad-r.minY, maxCy=canvas.height-pad-r.maxY;
+  cx = minCx<=maxCx ? Math.min(maxCx,Math.max(minCx,cx)) : canvas.width/2;
+  cy = minCy<=maxCy ? Math.min(maxCy,Math.max(minCy,cy)) : canvas.height/2;
+  l.x=cx/canvas.width; l.y=cy/canvas.height;
+  return {cx,cy,bounds:b};
+}
+function wmCanvasPoint(e){
+  const r=wmCanvas.getBoundingClientRect();
+  return { x:(e.clientX-r.left)*(wmCanvas.width/r.width), y:(e.clientY-r.top)*(wmCanvas.height/r.height) };
+}
+function hitWmLayer(l,x,y){
+  if(l.layout!=='single' || l.enabled===false) return false;
+  normalizeWmLayerPosition(l);
+  const cx=l.x*wmCanvas.width, cy=l.y*wmCanvas.height;
+  const a=-(l.angle||0)*Math.PI/180, dx=x-cx, dy=y-cy;
+  const lx=dx*Math.cos(a)-dy*Math.sin(a), ly=dx*Math.sin(a)+dy*Math.cos(a);
+  const b=wmMarkBounds(l,wmCanvas,wctx), pad=Math.max(12,wmCanvas.width*.01);
+  return lx>=b.minX-pad && lx<=b.maxX+pad && ly>=b.minY-pad && ly<=b.maxY+pad;
+}
+
+wmCanvas.addEventListener('pointerdown', e=>{
+  if(!wmImg) return;
+  const p=wmCanvasPoint(e);
+  const l=[...wmLayers].reverse().find(x=>hitWmLayer(x,p.x,p.y));
+  if(!l){ wmSelectedLayerId=null; drawWmScene(); return; }
+  wmSelectedLayerId=l.id;
+  wmDrag={ id:l.id, dx:p.x-l.x*wmCanvas.width, dy:p.y-l.y*wmCanvas.height };
+  wmCanvas.setPointerCapture?.(e.pointerId);
+  wmCanvas.style.cursor='grabbing';
+  drawWmScene();
+});
+wmCanvas.addEventListener('pointermove', e=>{
+  if(!wmDrag) return;
+  e.preventDefault();
+  const p=wmCanvasPoint(e), l=getLayerById(wmDrag.id);
+  if(!l) return;
+  l.x=(p.x-wmDrag.dx)/wmCanvas.width;
+  l.y=(p.y-wmDrag.dy)/wmCanvas.height;
+  clampWmLayer(l,wmCanvas,wctx);
+  drawWmScene();
+});
+function endWmDrag(e){
+  if(!wmDrag) return;
+  wmDrag=null; wmCanvas.style.cursor='grab';
+  try{ wmCanvas.releasePointerCapture?.(e.pointerId); }catch(_e){}
+  drawWmScene();
+}
+wmCanvas.addEventListener('pointerup',endWmDrag);
+wmCanvas.addEventListener('pointercancel',endWmDrag);
 
 function drawWmScene(forExport){
   if(!wmImg) return;
@@ -2143,10 +2292,23 @@ function drawWmScene(forExport){
     if(l.enabled===false) return;
     ctx.save();
     ctx.globalAlpha = l.opacity/100;
-    const drawOneMark = (cx, cy)=>{
+    const drawOneMark = (cx, cy, showSelection=false)=>{
       ctx.save();
       ctx.translate(cx, cy);
       ctx.rotate(l.angle * Math.PI/180);
+      const markBounds = wmMarkBounds(l, canvas, ctx);
+      if(showSelection){
+        const pad=Math.max(6,canvas.width*.006);
+        ctx.save();
+        ctx.globalAlpha=1;
+        ctx.setLineDash([8,6]);
+        ctx.lineWidth=Math.max(2,canvas.width*.002);
+        ctx.strokeStyle='rgba(232,119,106,.98)';
+        ctx.fillStyle='rgba(255,255,255,.10)';
+        ctx.fillRect(markBounds.minX-pad,markBounds.minY-pad,(markBounds.maxX-markBounds.minX)+pad*2,(markBounds.maxY-markBounds.minY)+pad*2);
+        ctx.strokeRect(markBounds.minX-pad,markBounds.minY-pad,(markBounds.maxX-markBounds.minX)+pad*2,(markBounds.maxY-markBounds.minY)+pad*2);
+        ctx.restore();
+      }
       if(l.types.includes('text') && l.text){
         ctx.fillStyle = l.textColor;
         ctx.font = `bold ${l.fontSize}px ${l.font}`;
@@ -2170,13 +2332,9 @@ function drawWmScene(forExport){
         }
       }
     } else {
-      let cx=canvas.width/2, cy=canvas.height/2;
-      const margin = Math.max(canvas.width,canvas.height)*0.08;
-      if(l.position==='br'){ cx=canvas.width-margin; cy=canvas.height-margin; }
-      if(l.position==='bl'){ cx=margin; cy=canvas.height-margin; }
-      if(l.position==='tr'){ cx=canvas.width-margin; cy=margin; }
-      if(l.position==='tl'){ cx=margin; cy=margin; }
-      drawOneMark(cx, cy);
+      normalizeWmLayerPosition(l);
+      const placed = clampWmLayer(l,canvas,ctx);
+      drawOneMark(placed.cx, placed.cy, !forExport && wmSelectedLayerId===l.id);
     }
     ctx.restore();
   });
@@ -2226,7 +2384,7 @@ function renderPresetList(){
 function applyPreset(id){
   const p = appData.wmPresets.find(x=>x.id===id);
   if(!p) return;
-  wmLayers = clone(p.layers).map(l=>{ l.logoImg=null; return l; });
+  wmLayers = clone(p.layers).map(l=>{ l.logoImg=null; normalizeWmLayerPosition(l); return l; });
   wmLayers.forEach(l=>{
     if(l.logoDataUrl){
       const img = new Image();
