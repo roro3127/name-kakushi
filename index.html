@@ -377,9 +377,12 @@
     </div>
 
     <div class="ed-subbar" id="sub-stamp">
-      <span class="small-note" style="color:#cfc7ba;flex:none;">タップした場所に名前文字を置くよ→</span>
-      <div id="stampChips" style="display:flex;gap:6px;"></div>
-      <button class="chip" id="stampCustom">✏️ 自由入力</button>
+      <span class="small-note" style="color:#cfc7ba;flex:none;">好きなスタンプを選んで画像をタップ→</span>
+      <div id="stampChips" style="display:flex;gap:6px;align-items:center;"></div>
+      <button class="chip" id="stampCustom">✏️ 文字</button>
+      <button class="chip" id="stampImageAdd">🖼️ 画像追加</button>
+      <button class="chip" id="stampManage">⚙️ 管理</button>
+      <input type="file" id="stampImageInput" accept="image/png,image/jpeg,image/webp,image/gif" style="display:none;">
     </div>
 
     <div class="ed-subbar" id="sub-eraser">
@@ -412,7 +415,7 @@ let appData = loadData();
 function loadData(){
   try{
     const raw = localStorage.getItem(STORAGE_KEY);
-    if(!raw) return { names:[], wmPresets:[], hidePrefs:{ kind:'marker', color:'#fff176', variant:0 } };
+    if(!raw) return { names:[], wmPresets:[], customStamps:[], hidePrefs:{ kind:'marker', color:'#fff176', variant:0 } };
     const d = JSON.parse(raw);
     d.names = (d.names||[]).map(n=>({
       ...n,
@@ -422,15 +425,24 @@ function loadData(){
       hideVariant: Number.isFinite(+n.hideVariant) ? +n.hideVariant : (Number.isFinite(+d.hidePrefs?.variant) ? +d.hidePrefs.variant : 0),
     }));
     d.wmPresets = d.wmPresets||[];
+    d.customStamps = Array.isArray(d.customStamps) ? d.customStamps.filter(x=>x && x.id && x.src) : [];
     d.hidePrefs = {
       kind: d.hidePrefs?.kind || 'marker',
       color: d.hidePrefs?.color || '#fff176',
       variant: Number.isFinite(+d.hidePrefs?.variant) ? +d.hidePrefs.variant : 0,
     };
     return d;
-  }catch(e){ return { names:[], wmPresets:[], hidePrefs:{ kind:'marker', color:'#fff176', variant:0 } }; }
+  }catch(e){ return { names:[], wmPresets:[], customStamps:[], hidePrefs:{ kind:'marker', color:'#fff176', variant:0 } }; }
 }
-function saveData(){ localStorage.setItem(STORAGE_KEY, JSON.stringify(appData)); }
+function saveData(){
+  try{
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(appData));
+    return true;
+  }catch(e){
+    toast('保存容量がいっぱいみたい。マイスタンプを少し減らしてね');
+    return false;
+  }
+}
 function uid(){ return Date.now().toString(36)+Math.random().toString(36).slice(2,7); }
 function clone(o){ return JSON.parse(JSON.stringify(o)); }
 function escapeHtml(s){
@@ -797,12 +809,16 @@ const effectCache = {};        // モザイク/ぼかし済み画像のキャッ
 
 function freshState(){ return { ops:[], stamps:[], comments:[] }; }
 function normalizeStamp(st){
+  const type = st?.type || (st?.src ? 'image' : 'text');
   return {
     ...st,
+    type,
     textColor: st?.textColor || '#3a3229',
     strokeColor: st?.strokeColor || 'rgba(255,255,255,.98)',
     fontSize: st?.fontSize || 26,
-    angle: st?.angle || 0,
+    width: st?.width || st?.fontSize || 72,
+    height: st?.height || st?.fontSize || 72,
+    angle: Number.isFinite(+st?.angle) ? +st.angle : 0,
   };
 }
 function migrateState(s){
@@ -1026,10 +1042,24 @@ function rebuildOverlay(){
 }
 
 /* ---------- スタンプ・コメント描画 ---------- */
+const stampImageCache = new Map();
+function getStampImage(src){
+  if(!src) return null;
+  if(stampImageCache.has(src)) return stampImageCache.get(src);
+  const img = new Image();
+  img.onload = ()=>requestRender();
+  img.src = src;
+  stampImageCache.set(src,img);
+  return img;
+}
 function stampMetrics(st, ctx){
+  if(st.type==='image'){
+    const w=Math.max(12,st.width||72), h=Math.max(12,st.height||72);
+    return { x:st.x-w/2, y:st.y-h/2, w, h };
+  }
   ctx.save();
   ctx.font = `700 ${st.fontSize}px 'Zen Kaku Gothic New', sans-serif`;
-  const tw = ctx.measureText(st.text).width;
+  const tw = ctx.measureText(st.text||'').width;
   ctx.restore();
   const padX = st.fontSize*.18, padY = st.fontSize*.16;
   const w = tw + padX*2, h = st.fontSize + padY*2;
@@ -1039,7 +1069,13 @@ function drawStamp(ctx, st){
   ctx.save();
   ctx.translate(st.x, st.y);
   ctx.rotate((st.angle||0)*Math.PI/180);
-  ctx.translate(-st.x, -st.y);
+  if(st.type==='image'){
+    const img=getStampImage(st.src);
+    const w=Math.max(12,st.width||72), h=Math.max(12,st.height||72);
+    if(img?.complete && img.naturalWidth) ctx.drawImage(img,-w/2,-h/2,w,h);
+    ctx.restore();
+    return;
+  }
   ctx.font=`700 ${st.fontSize}px 'Zen Kaku Gothic New', sans-serif`;
   ctx.textAlign='center';
   ctx.textBaseline='middle';
@@ -1049,10 +1085,10 @@ function drawStamp(ctx, st){
   ctx.shadowColor='rgba(58,50,41,.18)';
   ctx.shadowBlur=Math.max(2,st.fontSize*.12);
   ctx.shadowOffsetY=Math.max(1,st.fontSize*.06);
-  ctx.strokeText(st.text,st.x,st.y+st.fontSize*.02);
+  ctx.strokeText(st.text||'',0,st.fontSize*.02);
   ctx.shadowColor='transparent';
   ctx.fillStyle=st.textColor || '#3a3229';
-  ctx.fillText(st.text,st.x,st.y+st.fontSize*.02);
+  ctx.fillText(st.text||'',0,st.fontSize*.02);
   ctx.restore();
 }
 function commentMetrics(c, ctx){
@@ -1260,49 +1296,85 @@ document.getElementById('mosaicWidth').addEventListener('input', ()=>requestRend
 document.getElementById('eraserWidth').addEventListener('input', ()=>requestRender());
 updateTapeVariantUi();
 
-/* ---------- スタンプの文字候補 ---------- */
-let stampText = null, stampTextColor = '#3a3229';
+/* ---------- デコスタンプ ---------- */
+const BUILTIN_STAMPS = [
+  {id:'heart',label:'❤️',text:'❤️',size:54},
+  {id:'sparkles',label:'✨',text:'✨',size:52},
+  {id:'star',label:'⭐️',text:'⭐️',size:52},
+  {id:'flower',label:'🌸',text:'🌸',size:52},
+  {id:'hide',label:'見せられないよ😆',text:'見せられないよ😆',size:30},
+  {id:'secret',label:'ないしょ♡',text:'ないしょ♡',size:32},
+];
+let stampChoice = null;
+let stampTextColor = '#3a3229';
+function selectStampChoice(choice){ stampChoice=choice; renderStampChips(); toast('画像をタップすると置けるよ'); }
 function renderStampChips(){
-  const wrap = document.getElementById('stampChips');
-  wrap.innerHTML='';
-  const cands = appData.names.filter(n=>n.alias);
-  if(cands.length && stampText===null){ stampText = cands[0].alias; }
-  cands.forEach(n=>{
-    const b = document.createElement('button');
-    b.className = 'chip'+(stampText===n.alias?' on':'');
-    b.textContent = n.alias;
-    b.onclick = ()=>{ stampText = n.alias; renderStampChips(); };
-    wrap.appendChild(b);
+  const wrap=document.getElementById('stampChips'); wrap.innerHTML='';
+  const choices=[
+    ...BUILTIN_STAMPS.map(x=>({type:'text',key:'builtin-'+x.id,label:x.label,text:x.text,fontSize:x.size,color:'#3a3229'})),
+    ...appData.names.filter(n=>n.alias).map(n=>({type:'text',key:'name-'+n.id,label:n.alias,text:n.alias,fontSize:30,color:'#3a3229'})),
+    ...appData.customStamps.map(x=>({type:'image',key:'img-'+x.id,label:x.name||'画像',src:x.src,ratio:x.ratio||1})),
+  ];
+  if(!stampChoice && choices.length) stampChoice=choices[0];
+  choices.forEach(ch=>{
+    const b=document.createElement('button');
+    b.className='chip'+(stampChoice?.key===ch.key?' on':'');
+    if(ch.type==='image'){
+      b.title=ch.label;
+      b.style.padding='3px 7px';
+      const im=document.createElement('img'); im.src=ch.src; im.alt=ch.label;
+      im.style.cssText='width:28px;height:28px;object-fit:contain;display:block;'; b.appendChild(im);
+    }else b.textContent=ch.label;
+    b.onclick=()=>selectStampChoice(ch); wrap.appendChild(b);
   });
-  if(!cands.length){
-    const sp = document.createElement('span');
-    sp.className='small-note'; sp.style.color='#cfc7ba';
-    sp.textContent='別名の登録がないから「自由入力」を使ってね';
-    wrap.appendChild(sp);
-  }
 }
 document.getElementById('stampCustom').addEventListener('click', ()=>{
-  const m = showModal(`
-    <h3>名前スタンプの文字</h3>
+  const current=stampChoice?.type==='text'?stampChoice.text:'';
+  const m=showModal(`
+    <h3>文字スタンプを作る</h3>
     <label>置きたい文字</label>
-    <input type="text" id="scText" value="${escapeHtml(stampText||'')}" placeholder="例）もぐ">
-    <label>文字色</label>
-    <input type="color" id="scColor" value="${stampTextColor}">
-    <p class="small-note">白ふちは自動で付くから、ラインの上でも見えやすいよ。</p>
-    <div class="modal-actions">
-      <button class="btn btn-outline" id="scCancel">キャンセル</button>
-      <button class="btn btn-primary" id="scOk">これにする</button>
-    </div>
-  `);
+    <input type="text" id="scText" value="${escapeHtml(current)}" placeholder="例）見せられないよ😆">
+    <label>文字色</label><input type="color" id="scColor" value="${stampTextColor}">
+    <p class="small-note">白ふちは自動で付くから、画像の上でも見えやすいよ。</p>
+    <div class="modal-actions"><button class="btn btn-outline" id="scCancel">キャンセル</button><button class="btn btn-primary" id="scOk">これにする</button></div>`);
   document.getElementById('scCancel').onclick=()=>m.close();
   document.getElementById('scOk').onclick=()=>{
-    const t = document.getElementById('scText').value.trim();
-    if(!t){ toast('文字を入力してね'); return; }
-    stampText = t; stampTextColor = document.getElementById('scColor').value;
-    renderStampChips(); m.close();
-    toast('タップした場所に置けるよ');
+    const t=document.getElementById('scText').value.trim(); if(!t){toast('文字を入力してね');return;}
+    stampTextColor=document.getElementById('scColor').value;
+    stampChoice={type:'text',key:'custom-'+Date.now(),label:t,text:t,fontSize:30,color:stampTextColor};
+    renderStampChips(); m.close(); toast('画像をタップすると置けるよ');
   };
 });
+document.getElementById('stampImageAdd').onclick=()=>document.getElementById('stampImageInput').click();
+document.getElementById('stampImageInput').addEventListener('change', async e=>{
+  const file=e.target.files?.[0]; e.target.value=''; if(!file)return;
+  if(appData.customStamps.length>=12){toast('マイスタンプは12個までだよ');return;}
+  if(!file.type.startsWith('image/')){toast('画像ファイルを選んでね');return;}
+  try{
+    const src=await new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(r.result);r.onerror=reject;r.readAsDataURL(file);});
+    const img=await new Promise((resolve,reject)=>{const i=new Image();i.onload=()=>resolve(i);i.onerror=reject;i.src=src;});
+    const max=512, scale=Math.min(1,max/Math.max(img.naturalWidth,img.naturalHeight));
+    const w=Math.max(1,Math.round(img.naturalWidth*scale)), h=Math.max(1,Math.round(img.naturalHeight*scale));
+    const c=document.createElement('canvas'); c.width=w;c.height=h; const cx=c.getContext('2d'); cx.drawImage(img,0,0,w,h);
+    const data=c.toDataURL('image/png');
+    if(data.length>650000){toast('画像が大きすぎるみたい。もう少し小さい画像を使ってね');return;}
+    const item={id:uid(),name:(file.name||'マイスタンプ').replace(/\.[^.]+$/,''),src:data,ratio:w/h};
+    appData.customStamps.push(item);
+    if(!saveData()){appData.customStamps.pop();return;}
+    stampChoice={type:'image',key:'img-'+item.id,label:item.name,src:item.src,ratio:item.ratio};
+    renderStampChips(); toast('マイスタンプに追加したよ');
+  }catch(err){toast('画像を読み込めなかったよ');}
+});
+document.getElementById('stampManage').onclick=()=>{
+  const rows=appData.customStamps.map(x=>`<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--line);"><img src="${x.src}" style="width:44px;height:44px;object-fit:contain;background:#fff;border-radius:8px;"><span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(x.name||'マイスタンプ')}</span><button class="mini-btn stamp-del" data-id="${x.id}">削除</button></div>`).join('');
+  const m=showModal(`<h3>マイスタンプ管理</h3>${rows||'<p class="small-note">追加した画像スタンプはまだないよ。</p>'}<p class="small-note">透過PNGを使うと、背景なしで綺麗に置けるよ。最大12個まで保存できます。</p><div class="modal-actions"><button class="btn btn-primary" id="smClose">閉じる</button></div>`);
+  document.getElementById('smClose').onclick=()=>m.close();
+  document.querySelectorAll('.stamp-del').forEach(b=>b.onclick=()=>{
+    const id=b.dataset.id; appData.customStamps=appData.customStamps.filter(x=>x.id!==id); saveData();
+    if(stampChoice?.key==='img-'+id) stampChoice=null;
+    renderStampChips(); m.close(); toast('マイスタンプから削除したよ');
+  });
+};
 
 /* ---------- 選択バー ---------- */
 function updateSelBar(){
@@ -1310,14 +1382,21 @@ function updateSelBar(){
   if(!selected){ bar.classList.remove('show'); bar.innerHTML=''; return; }
   bar.classList.add('show');
   if(selected.type==='stamp'){
+    const target=edState.stamps.find(s=>s.id===selected.id);
     bar.innerHTML = `
-      <span class="small-note" style="color:#cfc7ba;flex:none;">🏷️ 名前スタンプ選択中</span>
+      <span class="small-note" style="color:#cfc7ba;flex:none;">✨ スタンプ選択中</span>
       <button class="chip" id="selSmaller">🔽 小さく</button>
       <button class="chip" id="selBigger">🔼 大きく</button>
-      <button class="chip" id="selEditStamp">✏️ 文字/色</button>
+      <button class="chip" id="selRotL">↶ 回転</button>
+      <button class="chip" id="selRotR">↷ 回転</button>
+      <button class="chip" id="selDuplicate">⧉ 複製</button>
+      ${target?.type==='image'?'':'<button class="chip" id="selEditStamp">✏️ 文字/色</button>'}
       <button class="chip" id="selDelete" style="background:#a5504a;border-color:#a5504a;">🗑️ 削除</button>
     `;
-    document.getElementById('selEditStamp').onclick = ()=> openStampEditModal(selected.id);
+    if(document.getElementById('selEditStamp')) document.getElementById('selEditStamp').onclick = ()=> openStampEditModal(selected.id);
+    document.getElementById('selRotL').onclick=()=>rotateSelected(-15);
+    document.getElementById('selRotR').onclick=()=>rotateSelected(15);
+    document.getElementById('selDuplicate').onclick=()=>duplicateSelected();
   } else {
     bar.innerHTML = `
       <span class="small-note" style="color:#cfc7ba;flex:none;">💬 コメント選択中</span>
@@ -1342,12 +1421,29 @@ function resizeSelected(factor){
   checkpoint();
   if(selected.type==='stamp'){
     const st = edState.stamps.find(s=>s.id===selected.id);
-    if(st) st.fontSize = Math.min(300, Math.max(10, st.fontSize*factor));
+    if(st){
+      if(st.type==='image'){
+        st.width=Math.min(1200,Math.max(16,st.width*factor));
+        st.height=Math.min(1200,Math.max(16,st.height*factor));
+      }else st.fontSize = Math.min(300, Math.max(10, st.fontSize*factor));
+    }
   } else {
     const c = edState.comments.find(x=>x.id===selected.id);
     if(c) c.fontSize = Math.min(300, Math.max(10, c.fontSize*factor));
   }
   requestRender(); scheduleProjectSave();
+}
+
+function rotateSelected(delta){
+  if(!selected || selected.type!=='stamp') return;
+  const st=edState.stamps.find(s=>s.id===selected.id); if(!st)return;
+  checkpoint(); st.angle=((st.angle||0)+delta+360)%360; requestRender(); scheduleProjectSave();
+}
+function duplicateSelected(){
+  if(!selected || selected.type!=='stamp') return;
+  const st=edState.stamps.find(s=>s.id===selected.id); if(!st)return;
+  checkpoint(); const cp=normalizeStamp({...clone(st),id:uid(),x:st.x+24/view.scale,y:st.y+24/view.scale});
+  edState.stamps.push(cp); selected={type:'stamp',id:cp.id}; updateSelBar(); requestRender(); scheduleProjectSave(); toast('複製したよ');
 }
 function openStampEditModal(id){
   const st = edState.stamps.find(s=>s.id===id);
@@ -1525,10 +1621,18 @@ edCanvas.addEventListener('pointerdown', (e)=>{
     return;
   }
   if(tool==='stamp'){
-    if(!stampText){ toast('先にスタンプの文字を選んでね'); return; }
+    if(!stampChoice){ toast('先にスタンプを選んでね'); return; }
     checkpoint();
-    const fs = Math.max(18, Math.round(baseImg.naturalWidth/28));
-    edState.stamps.push(normalizeStamp({ id:uid(), text:stampText, x:ip.x, y:ip.y, fontSize:fs, angle: (Math.random()*6-3), textColor:stampTextColor }));
+    if(stampChoice.type==='image'){
+      const base=Math.max(56,Math.round(baseImg.naturalWidth/7));
+      const ratio=Math.max(.15,Math.min(6,stampChoice.ratio||1));
+      let w=base,h=base/ratio;
+      if(h>base*1.6){h=base*1.6;w=h*ratio;}
+      edState.stamps.push(normalizeStamp({id:uid(),type:'image',src:stampChoice.src,x:ip.x,y:ip.y,width:w,height:h,angle:0}));
+    }else{
+      const fs=Math.max(18,Math.round(baseImg.naturalWidth/28));
+      edState.stamps.push(normalizeStamp({id:uid(),type:'text',text:stampChoice.text,x:ip.x,y:ip.y,fontSize:stampChoice.fontSize||fs,angle:0,textColor:stampChoice.color||stampTextColor}));
+    }
     requestRender(); scheduleProjectSave();
     return;
   }
@@ -1847,7 +1951,7 @@ async function openEditor(dataUrl, restoredState){
   edState = migrateState(restoredState);
   undoStack=[]; redoStack=[]; updateHistoryButtons();
   selected = null; updateSelBar();
-  stampText = null;
+  stampChoice = null;
   document.getElementById('editor').classList.add('open');
   document.body.style.overflow='hidden';
   resizeEdCanvas();
